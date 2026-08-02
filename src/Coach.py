@@ -1,58 +1,154 @@
+"""
+Génère le scénario complet de la séance : une liste d'annonces avec leur
+ancrage temporel, prêtes pour la synthèse vocale.
+
+Deux types d'ancrage (voir docs/Consignes_Anticipation.md) :
+
+- "fin_exacte"      : l'annonce doit se terminer PILE à ce temps (avant un
+                      effort). Le "Go" tombe exactement au bon moment.
+- "debut_immediate" : l'annonce démarre à ce temps, pas de contrainte de
+                      précision sur sa fin (récupération, briefing).
+
+Chaque annonce porte aussi le temps disponible avant elle (available_seconds)
+pour qu'on puisse vérifier, avant même de générer l'audio, qu'un texte n'est
+pas trop long pour la place qu'il a.
+"""
+
+from dataclasses import dataclass
+from typing import Optional
+
+from Pace import target_pace_text
+from Timeline import build_timeline
+
+# Vitesse de parole estimée (mots / seconde), countdown inclus.
+# Volontairement prudente : mieux vaut sous-estimer la place disponible
+# que de produire un "Go" en retard.
+WORDS_PER_SECOND = 2.5
+
+COUNTDOWN_WORDS = ["Trois.", "Deux.", "Un.", "Go."]
+
+
+@dataclass
+class Announcement:
+
+    anchor_type: str  # "fin_exacte" ou "debut_immediate"
+    anchor_time: int
+    text: str
+    available_seconds: Optional[float] = None
+
+    def estimated_speech_seconds(self):
+        word_count = len(self.text.split())
+        return word_count / WORDS_PER_SECOND
+
+    def fits(self):
+        if self.available_seconds is None:
+            return True
+        return self.estimated_speech_seconds() <= self.available_seconds
+
+
 class Coach:
 
-    def __init__(self):
-        pass
+    def __init__(self, threshold_speed):
+        self.threshold_speed = threshold_speed
 
-    def build_script(self, workout):
+    def build_scenario(self, workout):
+        """Construit la liste ordonnée des annonces pour toute la séance."""
 
-        script = []
+        timeline = build_timeline(workout["steps"])
 
-        script.append(
-            f"Aujourd'hui : {workout['title']}."
+        announcements = []
+
+        # Briefing initial (exception à la règle des 10 secondes)
+        announcements.append(
+            Announcement(
+                anchor_type="debut_immediate",
+                anchor_time=0,
+                text=self._briefing(workout),
+            )
         )
 
-        self._describe_steps(workout["steps"], script)
+        for index, step in enumerate(timeline):
 
-        return script
+            previous_step = timeline[index - 1] if index > 0 else None
 
-    def _describe_steps(self, steps, script):
+            if step.intensity_class == "Active":
 
-        for step in steps:
+                text = self._effort_text(step)
 
-            if step["type"] == "step":
+                # Cas particulier : aucun step avant le premier effort
+                # (ex. une "sortie longue" qui démarre direct en effort).
+                # Décision produit : le countdown est lancé en tout début
+                # de fichier. Le MP3 dépassera alors légèrement la durée
+                # TrainingPeaks (de la durée de ce countdown), au lieu de
+                # supprimer le "3. 2. 1. Go." pour cet effort.
+                available = previous_step.duration if previous_step else None
 
-                script.append(
-                    self._describe_step(step)
-                )
-
-            elif step["type"] == "repeat":
-
-                repeat = step["repeat"]
-
-                script.append(
-                    f"Bloc de {repeat} répétitions."
-                )
-
-                for i in range(repeat):
-
-                    script.append(
-                        f"Répétition {i+1}."
+                announcements.append(
+                    Announcement(
+                        anchor_type="fin_exacte",
+                        anchor_time=step.start,
+                        text=text,
+                        available_seconds=available,
                     )
+                )
 
-                    self._describe_steps(step["steps"], script)
+            else:
+                # Warm up (hors tout premier step, déjà couvert par le
+                # briefing), récupération, repos, retour au calme.
+                if index == 0:
+                    continue
 
-    def _describe_step(self, step):
+                text = self._rest_text(step)
 
-        duration = self._duration(step["duration"])
+                announcements.append(
+                    Announcement(
+                        anchor_type="debut_immediate",
+                        anchor_time=step.start,
+                        text=text,
+                    )
+                )
 
-        target = self._target(step["target"])
+        return announcements
 
-        name = step["name"]
+    # ------------------------------------------------------------------
+    # Construction des textes
+    # ------------------------------------------------------------------
 
-        if target:
-            return f"{name}. {duration}. Objectif : {target}."
+    def _briefing(self, workout):
+        return f"Aujourd'hui : {workout['title']}. C'est parti."
 
-        return f"{name}. {duration}."
+    def _effort_text(self, step):
+
+        parts = []
+
+        if step.is_first_in_repeat_block and step.repeat_total and step.repeat_total > 1:
+            if step.repeat_index == 1:
+                parts.append(f"Bloc de {step.repeat_total} répétitions.")
+            parts.append(f"Répétition {step.repeat_index} sur {step.repeat_total}.")
+
+        duration_text = self._duration(step.duration)
+        pace = target_pace_text(step.target, self.threshold_speed)
+
+        if pace:
+            parts.append(f"{duration_text} à {pace}.")
+        else:
+            parts.append(f"{duration_text}.")
+
+        parts.extend(COUNTDOWN_WORDS)
+
+        return " ".join(parts)
+
+    def _rest_text(self, step):
+
+        duration_text = self._duration(step.duration)
+        pace = target_pace_text(step.target, self.threshold_speed)
+
+        label = "Récupération" if step.intensity_class == "Rest" else step.name
+
+        if pace:
+            return f"{label}. {duration_text} à {pace}."
+
+        return f"{label}. {duration_text}."
 
     def _duration(self, seconds):
 
@@ -66,24 +162,3 @@ class Coach:
             return f"{minutes} minutes"
 
         return f"{sec} secondes"
-
-    def _target(self, target):
-
-        if not target:
-            return ""
-
-        minimum = target.get("MinValue")
-        maximum = target.get("MaxValue")
-
-        unit = target.get("Unit")
-
-        if minimum is None:
-            return ""
-
-        if unit == "PercentOfThresholdSpeed":
-            return f"{minimum} à {maximum} % de la vitesse seuil"
-
-        if unit == "PercentOfThresholdHeartRate":
-            return f"{minimum} à {maximum} % de la fréquence cardiaque seuil"
-
-        return f"{minimum} à {maximum} {unit}"

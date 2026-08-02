@@ -40,7 +40,7 @@ class WorkoutParser:
                     "duration": int(step["Length"]["Value"]),
                     "duration_unit": step["Length"]["Unit"],
 
-                    "intensity": step.get("Intensity"),
+                    "intensity_class": step.get("IntensityClass"),
 
                     "target": step.get("IntensityTarget"),
 
