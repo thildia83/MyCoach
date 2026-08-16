@@ -1,0 +1,50 @@
+name: Diagnostic du depot
+
+on:
+  workflow_dispatch:   # bouton manuel dans l'onglet Actions
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: RAPPORT
+        if: always()
+        run: |
+          echo "== 1. DERNIER COMMIT =="
+          git log -1 --format='%ad | %s' --date=short
+
+          echo ""
+          echo "== 2. FICHIERS A LA RACINE =="
+          ls -1
+
+          echo ""
+          echo "== 3. MODULES ATTENDUS =="
+          for f in Parser.py Pace.py Timeline.py Coach.py assembler.py tts.py main.py verifier_mp3.py; do
+            if [ -f "$f" ]; then echo "OK      $f ($(wc -l < $f) lignes)"; else echo "MANQUE  $f"; fi
+          done
+
+          echo ""
+          echo "== 4. DOSSIER Samples =="
+          ls -1 Samples/ 2>/dev/null || echo "Samples/ ABSENT"
+
+          echo ""
+          echo "== 5. BUG CONNU (Intensity vs IntensityClass) =="
+          grep -c "IntensityClass" Parser.py 2>/dev/null || echo "non trouve -> ancien code"
+
+          echo ""
+          echo "== 6. ANCRES DE TIMING =="
+          grep -rn "fin_exacte\|debut_immediate" --include=*.py . | head -n 5 || echo "ancres absentes -> ancien code"
+
+          echo ""
+          echo "== 7. tts.py : comment il lit la cle et la voix =="
+          grep -n "getenv\|environ\|voice_id\|API_KEY" tts.py 2>/dev/null || echo "tts.py absent"
+
+          echo ""
+          echo "== 8. SYNTAXE PYTHON =="
+          python -m compileall -q . && echo "OK" || echo "ERREURS ci-dessus"
